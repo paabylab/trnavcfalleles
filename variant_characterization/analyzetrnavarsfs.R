@@ -166,6 +166,100 @@ mw.dtout<-function(x, y){
   return(out)
 }
 
+anovatuk<-function(dat, mystrain, testinforow, testagainstcol = "testDat", ordervec){
+  # COPIED FROM ANOTHER SCRIPT
+  # Runs an ANOVA of category vs. test data (all in all date) for one strain, one category
+  # In: dat - data with columns strain, any specified in multiwaytests (columnname, mynarrow), testagainstcol
+  #     mystrain - strain to narrow to for this test
+  #     testinforow: one row data.table with columns myname (long format name), shortname (short format name),
+  #             columnname (column CATEGORY data is in alldat), mynarrow (text logical expression of how to further narrow data for this test, e.g. 'inform==T'),
+  #     testagisntcol - column name in alldat that's the y axis/continuous data to test against
+  #     ordervec -  order vector of all category values; used for ordering results
+  # Out: list of data.tables -
+  #       anout - ANOVA results. One row data.table with columns
+  #               Df_resid, DF residuals from ANOVA out
+  #               SumSq_resid, sum squares residuals from ANOVA out
+  #               MeanSq_resid, mean squares residuals from ANOVA out
+  #               Df_category,  DF for test category from ANOVA out
+  #               SumSq_category, sum squares for test category from ANOVA out
+  #               MeanSq_category, mean squares for test category from ANOVA out
+  #               Fvalue, ANOVA F value
+  #               pvalue, ANOVA p value
+  #       tukout - Tukey's HSD results. One row per inter-category comparison. Columns:
+  #               comparison, cat1-cat2 detail of comparison : default way tukey output displays
+  #               cat1, category this test is in (vs cat 2)
+  #               cat2, category this test is in (vs cat1)
+  #               diff, Tukey output
+  #               lwr, Tukey output
+  #               upr,  Tukey output
+  #               tukey.padj, Tukey output (adjusted p)
+  #       tuklabs - data.table with columns <column name in testinfo row>, label - < or > if this category is p < 0.05 different from FIRST category in this datat
+  #           (for plotting)
+  #       ns - data.table with columns categorylabel, n: number of observations in each category (that are non-NA!!)
+  
+  # Narrow data to that of interest
+  thisdat<-dat[displayname==mystrain & eval(parse(text = testinforow[, mynarrow])), ]
+  yvals<-thisdat[, get(testagainstcol)] # naming for prettier stats calls, returns
+  catvals<-factor(thisdat[, get(testinforow[, columnname])], # naming for prettier stats calls, returns
+                  levels = ordervec) # leveling so comparisons ordered as sensibly as automatically possible
+  # ns
+  ns<-data.table(as.matrix(data.table(catvals, yvals)[!is.na(yvals), table(catvals)]), keep.rownames = T)
+  setnames(ns, c("categorylabel", "n"))
+  
+  # ANOVA
+  myan<-anova(lm(yvals ~ catvals))
+  anout<-data.table( Df_resid = myan$Df[2], SumSq_resid = myan$`Sum Sq`[2], MeanSq_resid = myan$`Mean Sq`[2],
+                     Df_category = myan$Df[1], SumSq_category = myan$`Sum Sq`[1], 
+                     MeanSq_category = myan$`Mean Sq`[1], Fvalue = myan$`F value`[1], pvalue = myan$`Pr(>F)`[1])
+  # one way so just saving in one row
+  
+  # Tukey's HSD 
+  mytuk<-TukeyHSD(aov(yvals ~ catvals)) # NOTE my design likely not balanced
+  ## get categories separate: UPDATED way that doesn't rely on a given character not being in names. **Confirmed that given that levels = names(colorvec), this is true
+  ##   also updated to work if not all categories are actually in data...
+  myusedlevs<-sort(factor(names(table(catvals)[table(catvals)!=0]), levels = ordervec))
+  mycomps<-unlist(
+    lapply(1:(length(myusedlevs)-1), function(i){
+      lapply((i+1):length(myusedlevs), function(j){
+        c(myusedlevs[j], myusedlevs[i])
+      })
+    }),
+    recursive = F)
+  
+  tukout<-data.table(comparison = rownames(mytuk[[1]]), # maybeeee add column with rownames from tuk so if something's weird, can confirm
+                     cat1 = sapply(mycomps, function(x) x[1]),
+                     cat2 = sapply(mycomps, function(x) x[2]),
+                     mytuk[[1]])
+  setnames(tukout, "p adj", "tukey.padj")
+  
+  # LABELS based on ANOVA and TUKEY results for comparison vs. first (reference level) - not for saving, for plotting
+  ## asterisk if p < 0.05; next line is '>' if mean is larger than reference category, '<' if less than reference category
+  mycats<-ordervec
+  if(anout$pvalue<0.05){ # only make non-blank labels/look at comparisons if ANOVA is nominally significant
+    tuklabs<-tukout[cat2==mycats[1], .(cat1, tukey.padj, diff)]
+    tuklabs[tukey.padj >= 0.05, label:= ""]
+    tuklabs[tukey.padj < 0.05 & diff < 0, label := "<"]
+    tuklabs[tukey.padj < 0.05 & diff > 0, label := ">"]
+    # tuklabs[,label := ifelse(tukey.padj<0.05, "*", "")]
+    tuklabs<-tuklabs[,.(cat1, label)]
+    ## include any not observed categories (including first level itself!) and order appropriately
+    tuklabs<-rbind(data.table(cat1 = mycats[!mycats%in%tuklabs$cat1], label = ""),
+                   tuklabs)
+    # order in order of input vector
+    tuklabs<-tuklabs[order(match(cat1, mycats))]
+  }else{ # all are blank/no asterisk
+    tuklabs<-data.table(cat1 = ordervec,
+                        label = "")
+  }
+  setnames(tuklabs, "cat1",testinforow[, columnname]) # Name so it's same column name as in overall data
+  
+  # Return
+  return(list(anout = data.table(testinforow[, myname], anout), 
+              tukout = data.table(testinforow[, myname], tukout),
+              tuklabs = data.table(testinforow[, myname], tuklabs), 
+              ns = data.table(testinforow[, myname], ns)))
+}
+
 gtcounts2sfs<-function(gtc.one){
   # Takes a data.table with one row per variant of interest and returns site frequency spectrum (in terms of number singletons, number doubletons, etc)
   mincts<-gtc.one[, min(n_homref, n_homalt), by = .I]$V1
@@ -201,11 +295,18 @@ gettajdsfs <- function(sfs){
 }
 
 # SO FAR THIS IS NOT PER KB, ALSO NEED LENGTH INFORMATION!!
+## length APPROX for a subset of gtcts
+gtcounts2totln<-function(gtc.one){
+  # Takes gtcounts filtered for whatever, gets the length of the summed exons (in bp)
+  # returns as data table
+  dat.un<-unique(gtc.one[, .(gene_id, bp_length)])
+  return(data.table( bp.length.approx = dat.un[, sum(bp_length)]))
+}
 # may want to do the process per exon and per gene....exons might be more comparable to tRNAs....
 
 #### Arguments & inputs ####
-p<-arg_parser("tRNA gene location analyses", 
-              name = "trna_location_analyses.R", hide.opts = TRUE)
+p<-arg_parser("tRNA variant site frequency spectra & related analyses", 
+              name = "analyzetrnavarsfs.R", hide.opts = TRUE)
 
 # tRNA Input file related
 p<-add_argument(p, "--speciesf",
@@ -228,6 +329,15 @@ p<-add_argument(p, "--trnavarcts",
 p<-add_argument(p, "--protvarcts",
                 help = "EXAMPLE path to file with one row per variant in any protein-coding exo with genotype counts. Columns are CHROM, POS, ID, REF, ALT, gene_id, n_homref, n_homalt, n_het, n_miss
                 Where species ID/species specific info is, put SAMP instead",
+                type = "character")
+p<-add_argument(p, "--alinfo",
+                help = "path to tRNA gene allele info including isotype switching, used for splitting tRNAs into classes of interest (output of charisotypeswitching.R).
+                Needs same speciesID etc as in speciesf. All species together",
+                type = "character")
+p<-add_argument(p, "--tnamelocmap",
+                help = "path to file containing tRNA names as in allelic analysis and tRNA gene locations - for intersecting bed files with other tRNA data.
+                All species together. Ex as output by location analyses in _tRNAgeneinfo_combined.txt file. 
+                Required/used columns: displayname, tRNA [as in personal tRNA analyses], Chr, Start, End. ***End & chr are used as starts can be diff bed format vs not",
                 type = "character")
 
 
@@ -286,8 +396,10 @@ write.table(usebedinfo$allbedflagged, gzfile(file.path(datdir, paste0(p$baseoutn
             quote = F, row.names = F, sep = "\t")
 write.table(usebedinfo$mergedbed, gzfile(file.path(datdir, paste0(p$baseoutname, "_bedrecords_mergedoverlappingexons.txt.gz"))),
             quote = F, row.names = F, sep = "\t")
-write.table(gbed, gzfile(file.path(datdir, paste0(p$baseoutname, "_bedrecords_combinedpergene.txt.gz"))),
-            quote = F, row.names = F, sep = "\t")
+
+# Now going to save these after adding subclass
+#write.table(gbed, gzfile(file.path(datdir, paste0(p$baseoutname, "_bedrecords_combinedpergene.txt.gz"))),
+ #           quote = F, row.names = F, sep = "\t")
 
 # --- Read in allele count files, annotate with bed info of interest
 tc<-data.table(fread.mult(sinfo, p$trnavarcts, header = T), geneclass="tRNA")
@@ -301,19 +413,63 @@ rm(tc, pc)
 setkey(gbed, displayname, shortname, geneclass, gene_id)
 gtcts<-gbed[gtcts]
 
+# --- Add in tRNA gene *subclass* for functional etc
+# Get these definitions in current way doing it. Would probably want to update long term!
+alinfo<-fread(p$alinfo, header = T)[grepl("Reference", allelename)] # only keep ref ones
+setkey(alinfo, displayname)
+alinfo[ all.lost!=T & Codon!="NNN" & Classification!="Lost", subclass:="tRNA: Putatively functional"]
+alinfo[is.na(subclass), subclass:="tRNA: Putatively nonfunctional"]
+alinfo[startsWith(tRNA, "chr"), tRNA:= sapply(tRNA, function(x) substr(x, 4, nchar(x)))]
+
+# Add these classifications into data
+## need locations because names don't match
+tinfo.wloc<-fread(p$tnamelocmap, header = T, select = c("displayname", "tRNA", "Chr", "End"))# end only merging for bed & off by one reasons
+tinfo.wloc[startsWith(tRNA, "chr"), tRNA:= sapply(tRNA, function(x) substr(x, 4, nchar(x)))]
+setkey(alinfo, displayname, tRNA)
+setkey(tinfo.wloc, displayname, tRNA)
+minfo<-alinfo[,.(displayname, tRNA, subclass)][tinfo.wloc]
+setnames(minfo, c("Chr", "End"), c("chr", "end"))
+setkey(minfo, displayname, chr, end) # end only merging for bed & off by one reasons
+
+## Get tRNA names, classifications into gtcts data
+setkey(gtcts, displayname, chr, end)
+gtcts<-minfo[gtcts]
+cat(paste("----> Number of tRNA IDs not matched: ", nrow(gtcts[geneclass=="tRNA" & is.na(tRNA)]), "\n"))
+## fill in protein subclass
+gtcts[geneclass=="protein", subclass:="Protein"]
+setcolorder(gtcts, c("displayname", "shortname", "geneclass", "subclass", "gene_id", "tRNA", "chr", "start", "end"))
+
+## Add this into merged bed data
+setkey(minfo, displayname, chr, end)
+setkey(gbed, displayname, chr, end)
+gbed<-minfo[gbed]
+cat(paste("----> Number of tRNA IDs not matched in gbed: ", nrow(gbed[geneclass=="tRNA" & is.na(tRNA)]), "\n"))
+### fill in protein subclass
+gbed[geneclass=="protein", subclass:="Protein"]
+setcolorder(gbed, c("displayname", "shortname", "geneclass", "subclass", "gene_id", "tRNA", "chr", "start", "end"))
+write.table(gbed, gzfile(file.path(datdir, paste0(p$baseoutname, "_bedrecords_combinedpergene.txt.gz"))),
+           quote = F, row.names = F, sep = "\t")
+
 # --- Get pop gen metrics of interest: per VARIANT
 gtcts[, nStrainsWithGT:=n_homref + n_homalt]
 gtcts[, pStrainsWithGT:=nStrainsWithGT/(n_homref + n_homalt + n_het + n_miss)] # for filtering later
 gtcts[, MAF_obsgts:=min(n_homref, n_homalt)/(n_homref + n_homalt), by = .I]
 gtcts[, MAF_allstrains:=min(n_homref, n_homalt)/(n_homref + n_homalt + n_het + n_miss), by = .I]
+
 # Save
 write.table(gtcts, gzfile(file.path(datdir, paste0(p$baseoutname, "_pervariant_counts_maf.txt.gz"))),
             quote = F, row.names = F, sep = "\t")
 
-# Summarize site coverage across gene sets, stat difference if any
+# --- Summarize site coverage across gene sets, stat difference if any
+setkey(gtcts, displayname, geneclass, subclass)
 scov<-gtcts[, .(nsites = .N,nsites95cov = sum(pStrainsWithGT>0.95), nsites90cov = sum(pStrainsWithGT>0.9), nsites80cov = sum(pStrainsWithGT>0.8)), by = .(displayname, geneclass)]
 scov[, `:=`(psites95cov = nsites95cov/nsites, psites90cov = nsites90cov/nsites, psites80cov = nsites80cov/nsites)]
+scov.sub<-gtcts[, .(nsites = .N,nsites95cov = sum(pStrainsWithGT>0.95), nsites90cov = sum(pStrainsWithGT>0.9), nsites80cov = sum(pStrainsWithGT>0.8)), by = .(displayname, subclass)]
+scov.sub[, `:=`(psites95cov = nsites95cov/nsites, psites90cov = nsites90cov/nsites, psites80cov = nsites80cov/nsites)]
+
 write.table(scov, file.path(datdir, paste0(p$baseoutname, "_genotypecoverage_nonmissing_perset.txt")),
+            quote = F, row.names = F, sep = "\t")
+write.table(scov.sub, file.path(datdir, paste0(p$baseoutname, "_genotypecoverage_nonmissing_perSUBset.txt")),
             quote = F, row.names = F, sep = "\t")
 
 # --- Get pop gen metrics of interest: per GENE
@@ -323,13 +479,64 @@ write.table(scov, file.path(datdir, paste0(p$baseoutname, "_genotypecoverage_non
 # --- Get pop gen metrics over GENE SETS of interest
 #       include or exclude indels
 #       missingness is tricky, going to make SFS rare-weighted...Need to FILTER for this so it's not as big a deal
-tajdsets<-rbindlist(list(
-  data.table(gtypethreshold = "90%", sites = "INDELs included", gtcts[pStrainsWithGT>0.9, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)]),
-  data.table(gtypethreshold = "90%", sites = "INDELs excluded", gtcts[pStrainsWithGT>0.9 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)]), ## sometimes ID has the other allele for....reasons
-  data.table(gtypethreshold = "80%", sites = "INDELs included", gtcts[pStrainsWithGT>0.8, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)]),
-  data.table(gtypethreshold = "80%", sites = "INDELs excluded", gtcts[pStrainsWithGT>0.8 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)]) ## sometimes ID has the other allele for....reasons
+tajdsets<-list(
+  # *** can I add in here the length used...gets tricky with inclusion/exclusion....
+  # DOING: adding length of unique genes that had any sites included for each
+  data.table(gtypethreshold = "90%", sites = "INDELs included", 
+             gtcts[pStrainsWithGT>0.9, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)][
+               gtcts[pStrainsWithGT>0.9,  gtcounts2totln(.SD), by = .(displayname, geneclass)], , on = c("displayname", "geneclass")
+             ]),
+  data.table(gtypethreshold = "90%", sites = "INDELs excluded", 
+             gtcts[pStrainsWithGT>0.9 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)][
+               gtcts[pStrainsWithGT>0.9 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1,  gtcounts2totln(.SD), by = .(displayname, geneclass)], , on = c("displayname", "geneclass")
+             ]), ## sometimes ID has the other allele for....reasons
+  data.table(gtypethreshold = "80%", sites = "INDELs included", 
+             gtcts[pStrainsWithGT>0.8, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)][
+               gtcts[pStrainsWithGT>0.8,  gtcounts2totln(.SD), by = .(displayname, geneclass)], , on = c("displayname", "geneclass")
+             ]),
+  data.table(gtypethreshold = "80%", sites = "INDELs excluded", 
+             gtcts[pStrainsWithGT>0.8 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1, gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, geneclass)][
+               gtcts[pStrainsWithGT>0.8 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1,  gtcounts2totln(.SD), by = .(displayname, geneclass)], , on = c("displayname", "geneclass")
+             ]), ## sometimes ID has the other allele for....reasons
+  ## NEW: subclasses. for tRNAs only
+  data.table(gtypethreshold = "90%", sites = "INDELs included", 
+             gtcts[pStrainsWithGT>0.9 & geneclass=="tRNA", gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, subclass)][
+               gtcts[pStrainsWithGT>0.9 & geneclass=="tRNA",  gtcounts2totln(.SD), by = .(displayname, subclass)], , on = c("displayname", "subclass")
+             ]),
+  data.table(gtypethreshold = "90%", sites = "INDELs excluded", 
+             gtcts[pStrainsWithGT>0.9 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1 & geneclass=="tRNA", gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, subclass)][
+               gtcts[pStrainsWithGT>0.9 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1 & geneclass=="tRNA",  gtcounts2totln(.SD), by = .(displayname, subclass)], , on = c("displayname", "subclass")
+             ]), ## sometimes ID has the other allele for....reasons
+  data.table(gtypethreshold = "80%", sites = "INDELs included", 
+             gtcts[pStrainsWithGT>0.8 & geneclass=="tRNA", gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, subclass)][
+               gtcts[pStrainsWithGT>0.8 & geneclass=="tRNA",  gtcounts2totln(.SD), by = .(displayname, subclass)], , on = c("displayname", "subclass")
+             ]
+             ),
+  data.table(gtypethreshold = "80%", sites = "INDELs excluded", 
+             gtcts[pStrainsWithGT>0.8 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1 & geneclass=="tRNA", gettajdsfs(gtcounts2sfs(.SD)), by = .(displayname, subclass)][
+               gtcts[pStrainsWithGT>0.8 & nchar(REF)==1 & nchar(ALT)==1 & nchar(ID) ==1 & geneclass=="tRNA",  gtcounts2totln(.SD), by = .(displayname, subclass)], , on = c("displayname", "subclass")
+             ]) ## sometimes ID has the other allele for....reasons
   
-))
+)
+## Fix subclass/geneclass name
+tajdsets.n<-lapply(tajdsets, function(x){
+  out<-x
+  if("geneclass"%in%names(x)){
+    setnames(x, "geneclass", "class_or_subclass")
+  }else if("subclass"%in%names(x)){
+    setnames(x, "subclass", "class_or_subclass")
+  }
+  return(out)
+})
+
+tajdsets<-rbindlist(tajdsets.n)
+rm(tajdsets.n)
+
+## add per kb corrections
+tajdsets[, `:=`(w_theta_perkb_approx = w_theta_uncorrected/(bp.length.approx/1e3),
+                pi_perkb_approx = pi_uncorrected/(bp.length.approx/1e3))]
+
+## Save
 write.table(tajdsets, file.path(datdir, paste0(p$baseoutname, "_tajimasd_pergeneset_estimates.txt")),
             quote = F, row.names = F, sep = "\t")
 
@@ -352,13 +559,38 @@ mw.maf<-rbindlist(lapply(sinfo$displayname, function(sp){
     data.table(displayname = sp, test = "MAF of all strains, tRNA vs protein",
                   mw.dtout(gtcts[displayname==sp & geneclass=="tRNA", MAF_allstrains], gtcts[displayname==sp & geneclass=="protein", MAF_allstrains])),
     data.table(displayname = sp, test = "MAF of gt observed, tRNA vs protein",
-             mw.dtout(gtcts[displayname==sp & geneclass=="tRNA", MAF_obsgts], gtcts[displayname==sp & geneclass=="protein", MAF_obsgts]))
+             mw.dtout(gtcts[displayname==sp & geneclass=="tRNA", MAF_obsgts], gtcts[displayname==sp & geneclass=="protein", MAF_obsgts])),
+    # NEW nonfunc tRNAs - just to get medians
+    data.table(displayname = sp, test = "MAF of all strains, nonfunc tRNA vs func tRNA",
+               mw.dtout(gtcts[displayname==sp & subclass=="tRNA: Putatively nonfunctional", MAF_allstrains],
+                        gtcts[displayname==sp & subclass=="tRNA: Putatively functional", MAF_allstrains]))
   )
   return(out)
 }))
 write.table(mw.maf, file.path(mafdir, paste0(p$baseoutname, "_mafMWres.txt")),
             quote = F, row.names = F, sep = "\t")
-## Number, proportion that are singletons (observed one strain)
+
+## ANOVA for subclasses (new)
+aov.mw<-lapply(sinfo$displayname, function(sp){
+  anovatuk(dat = gtcts, mystrain = sp, 
+           testinforow = data.table(myname = sp, shortname = sp, columnname = "subclass", mynarrow = "is.character(displayname)"),
+           testagainstcol = "MAF_allstrains",
+           ordervec = c("Protein", "tRNA: Putatively functional", "tRNA: Putatively nonfunctional")
+           )
+})
+anout<-rbindlist(lapply(aov.mw, function(x) x$anout))
+tukout<-rbindlist(lapply(aov.mw, function(x) x$tukout))
+tuklabs<-rbindlist(lapply(aov.mw, function(x) x$tuklabs)) # these don't make total sense here
+ansnsout<-rbindlist(lapply(aov.mw, function(x) x$ns))
+### Save
+write.table(anout, file.path(mafdir, paste0(p$baseoutname, "_maf_subclassANOVA_overview.txt")),
+            quote = F, row.names = F, sep = "\t")
+write.table(tukout, file.path(mafdir, paste0(p$baseoutname, "_maf_subclassANOVATukeys_overview.txt")),
+            quote = F, row.names = F, sep = "\t")
+write.table(ansnsout, file.path(mafdir, paste0(p$baseoutname, "_maf_subclassANOVA_ns.txt")),
+            quote = F, row.names = F, sep = "\t")
+
+## Number, proportion that are singletons (observed one strain): gene classes 
 singprop<-gtcts[, .(n_variants =.N,n_singletons = sum(n_homref==1 | n_homalt==1)), by = .(displayname, geneclass)]
 singprop[, prop_singletons:=n_singletons/n_variants]
 chisq.sing<-singprop[, .(chisq = chisq.test(as.matrix(n_variants, n_singletons, nrow = 2))$statistic,
@@ -367,10 +599,71 @@ chisq.sing<-singprop[, .(chisq = chisq.test(as.matrix(n_variants, n_singletons, 
 setkey(singprop, displayname)
 setkey(chisq.sing, displayname)
 singprop.out<-singprop[chisq.sing]
-write.table(singprop.out, file.path(mafdir, paste0(p$baseoutname, "_proportionsingletonvariants.txt")),
+write.table(singprop.out, file.path(mafdir, paste0(p$baseoutname, "_proportionsingletonvariants_sets.txt")),
             quote = F, row.names = F, sep = "\t")
 
-# Initial just plot all the MAFs NO FILTERS
+## Number, proportion that are singletons (observed one strain): gene Subsets
+singprop.sub<-gtcts[, .(n_variants =.N,n_singletons = sum(n_homref==1 | n_homalt==1)), by = .(displayname, subclass)]
+singprop.sub[, prop_singletons:=n_singletons/n_variants]
+chisq.sub.sing<-singprop.sub[, .(chisq = chisq.test(as.matrix(n_variants, n_singletons, nrow = 3))$statistic,
+                         df = chisq.test(as.matrix(n_variants, n_singletons, nrow = 3))$parameter,
+                         chisq.pval = chisq.test(as.matrix(n_variants, n_singletons, nrow = 3))$p.value), by = displayname]
+setkey(singprop.sub, displayname)
+setkey(chisq.sub.sing, displayname)
+singprop.sub.out<-singprop.sub[chisq.sub.sing]
+write.table(singprop.sub.out, file.path(mafdir, paste0(p$baseoutname, "_proportionsingletonvariants_subsets.txt")),
+            quote = F, row.names = F, sep = "\t")
+
+# --- Two main comparisons of interest: proteins vs functional tRNAs, proteins vs all tRNAs (func + nonfunc)
+# MW for MAF
+mw.maf.2<-rbindlist(lapply(sinfo$displayname, function(sp){
+  out<-rbind(
+    data.table(displayname = sp, test = "MAF of all strains, tRNA (func+nonfunc) vs protein",
+               mw.dtout(gtcts[displayname==sp & geneclass=="tRNA", MAF_allstrains], gtcts[displayname==sp & geneclass=="protein", MAF_allstrains])),
+    data.table(displayname = sp, test = "MAF of all strains, tRNA (func) vs protein",
+               mw.dtout(gtcts[displayname==sp & subclass=="tRNA: Putatively functional", MAF_allstrains], gtcts[displayname==sp & geneclass=="protein", MAF_allstrains]))
+  )
+  return(out)
+}))
+## **Add adjusted p value for 2 tests each time
+mw.maf.2[, twocomp.adj.p:=mw.p.value/2]
+## Save
+write.table(mw.maf.2, file.path(mafdir, paste0(p$baseoutname, "_mafMWres_twocomps.txt")),
+            quote = F, row.names = F, sep = "\t")
+
+# ChiSq for prop singletons
+  # singprop.out is tRNA vs protein, just need to do other
+## Do for prot vs tRNA(func)
+gtcts[subclass=="Protein", test2tmp:="Protein"]
+gtcts[subclass=="tRNA: Putatively functional", test2tmp:="tRNA-func"]
+setkey(gtcts, displayname, test2tmp)
+singprop.2<-gtcts[!is.na(test2tmp), .(n_variants =.N,n_singletons = sum(n_homref==1 | n_homalt==1)), by = .(displayname, test2tmp)]
+singprop.2[, prop_singletons:=n_singletons/n_variants]
+chisq.2.sing<-singprop.2[, .(chisq = chisq.test(as.matrix(n_variants, n_singletons, nrow = 3))$statistic,
+                                 df = chisq.test(as.matrix(n_variants, n_singletons, nrow = 3))$parameter,
+                                 chisq.pval = chisq.test(as.matrix(n_variants, n_singletons, nrow = 3))$p.value), by = displayname]
+setkey(singprop.2, displayname)
+setkey(chisq.2.sing, displayname)
+singprop.2.out<-singprop.2[chisq.2.sing]
+setnames(singprop.2.out, "test2tmp", "geneclass")
+gtcts[, test2tmp:=NULL] # clean up
+
+## **Add adjusted p value for 2 tests each time & combine
+singprop.out[, comparison:="Protein vs. tRNA (func+nonfunc)"]
+singprop.2.out[, comparison:="Protein vs. tRNA (func)"]
+singprop.2.out<-rbind(singprop.out, singprop.2.out)
+setcolorder(singprop.2.out, c("displayname", "comparison"))
+#     may need to convert from chisq dist
+singprop.2.out[,`:=` (twocomp.adj.chisq=chisq/2, twocomp.adj.pfromorig=chisq.pval/2)]
+singprop.2.out[, twocomp.adj.p.ln:=sapply(twocomp.adj.chisq, pchisq, df = 1, lower.tail = F, log.p = T)] # this is in log space so can actually see it
+# 10 to the this
+singprop.2.out[, twocomp.adj.p.10tothis:=twocomp.adj.p.ln/log(10)]
+
+## Save
+write.table(singprop.2.out, file.path(mafdir, paste0(p$baseoutname, "_proportionsingletonvariants_twocomps.txt")),
+            quote = F, row.names = F, sep = "\t")
+
+# --- Initial just plot all the MAFs NO FILTERS, gene SETS
 mafp<-ggplot(gtcts) + geom_histogram(aes(MAF_allstrains, fill = geneclass), alpha = 0.4) +
   ylab("Variant count") + xlab("Minor allele frequency (of all strains)") +
   facet_wrap(~factor(displayname, levels = sinfo$displayname)) + myggtheme
@@ -420,7 +713,7 @@ mafp.obsgt.viol.logy<-ggplot(gtcts) + geom_violin(aes(geneclass, MAF_obsgts, fil
 
 
 ## Save plots
-pdf(file.path(mafdir, paste0(p$baseoutname, "_mafdistplots.pdf")), 9, 4)
+pdf(file.path(mafdir, paste0(p$baseoutname, "_mafdistplots_sets.pdf")), 9, 4)
 print(mafp + ggtitle("Raw counts - minor allele freq of all strains"))
 print(mafp.prop + ggtitle("Prop. of variants; 0.01 bins"))
 print(mafp.viol + ggtitle("MAF of all strains, absolute scale"))
@@ -432,6 +725,29 @@ print(mafp.obsgt.viol + ggtitle("MAF of obs gt strains, absolute scale"))
 print(mafp.obsgt.viol.logy + ggtitle("MAF of obs gt strains, log10 y"))
 invisible(dev.off())
 
+
+# --- plot gene subsets (tRNA putative nonfunctional stuff)
+sub.viol<-ggplot(gtcts) + geom_violin(aes(subclass, MAF_allstrains, fill = subclass), color = NA) + 
+  geom_boxplot(aes(subclass, MAF_allstrains), outliers = F, fill = NA, color = "black", width = 0.05) +
+  scale_x_discrete(expand = expansion(mult = c(0, 0), add = c(0, 0))) + 
+  ylab("Minor allele frequency\n(absolute scale)") + xlab("Gene class") +
+  facet_wrap(~factor(displayname, levels = sinfo$displayname), scales = "free_x") + myggtheme + 
+  theme(strip.text.x = element_text(face = "italic"), legend.position = "none", panel.grid = element_blank(),
+        axis.text.x = element_text(angle=45, vjust=1, hjust=1)) 
+
+sub.viol.logy<-ggplot(gtcts) + geom_violin(aes(subclass, MAF_allstrains, fill = subclass), color = NA, alpha = 0.4) + 
+  geom_boxplot(aes(subclass, MAF_allstrains), outliers = F, fill = NA, color = "black", width = 0.05) +
+  scale_y_log10(expand = expansion(mult = c(0, 0), add = c(0.03, 0.6))) + # FIX THIS SO THEY'RE MORE EVEN
+  scale_x_discrete(expand = expansion(mult = c(0, 0), add = c(0, 0))) + 
+  ylab("Minor allele frequency\n(log scale)") + xlab("Gene class") +
+  facet_wrap(~factor(displayname, levels = sinfo$displayname), scales = "free_x") + myggtheme + 
+  theme(strip.text.x = element_text(face = "italic"), legend.position = "none", panel.grid = element_blank(),
+        axis.text.x = element_text(angle=45, vjust=1, hjust=1)) 
+
+pdf(file.path(mafdir, paste0(p$baseoutname, "_mafdistplots_SUBsets.pdf")), 9, 4)
+print(sub.viol)
+print(sub.viol.logy)
+invisible(dev.off())
 
 # Plots & stats
 # FILTER to non-pseud tRNAs or something here? INTRONS EXCLUDE
